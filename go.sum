@@ -2,3 +2,5 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/holimon/requests v0.0.0-20210629075818-d364a8d3caf3 h1:hG7G0uI2MmeC+jBv74ezNl9ABLw2hzT28rj0m908N4E=
 github.com/holimon/requests v0.0.0-20210629075818-d364a8d3caf3/go.mod h1:6RH5ydX8vytp3YXMw6A52h+kqL56qkNnXc0x17YkxWU=
+github.com/patrickmn/go-cache v2.1.0+incompatible h1:HRMgzkcYKYpi3C8ajMPV8OFXaaRUnok+kx1WdO15EQc=
+github.com/patrickmn/go-cache v2.1.0+incompatible/go.mod h1:3Qf8kWWT7OJRJbdiICTKqZju1ZixQ/KpMGzzAfe6+WQ=

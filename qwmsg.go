@@ -3,28 +3,35 @@ package qwmsg
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path"
 	"runtime"
 	"time"
 
 	"github.com/holimon/requests"
+	"github.com/patrickmn/go-cache"
 )
 
 type Config struct {
-	Corpid         string
-	Corpsecret     string
-	Agentid        int
-	TokenExpiresin int64
-	Retry          int
+	Corpid     string
+	Corpsecret string
+	Agentid    uint
+	Expiresin  uint
+	Retry      int
 }
 
-type acToken struct {
-	Content  string
-	stop     chan bool
-	Interval time.Duration
+type actkCache struct {
+	stop       chan bool
+	interval   time.Duration
+	cache      *cache.Cache
+	cacheLocal string
 }
+
+const tkcacheKey = "TOKEN"
+const maxExpiresin = 7000
 
 type Qwmsg struct {
-	Token       *acToken
+	tokenCache  *actkCache
 	Configs     Config
 	CommonField map[string]interface{}
 }
@@ -33,18 +40,10 @@ type CommonField struct {
 	ToUser      string
 	ToParty     string
 	ToTag       string
-	AgentId     int
+	AgentId     uint
 	Enidtrans   bool
 	Endupcheck  bool
 	Dupinterval int
-}
-
-func IF(condition bool, trueval, falseval interface{}) interface{} {
-	if condition {
-		return trueval
-	} else {
-		return falseval
-	}
 }
 
 type MediaType string
@@ -64,6 +63,14 @@ var (
 	ErrorStill         errmsg = errors.New("exception still occurs after the request is retried")
 )
 
+func IF(condition bool, trueval, falseval interface{}) interface{} {
+	if condition {
+		return trueval
+	} else {
+		return falseval
+	}
+}
+
 func mergeMaps(maps ...map[string]interface{}) map[string]interface{} {
 	merged := make(map[string]interface{})
 	for _, m := range maps {
@@ -74,56 +81,81 @@ func mergeMaps(maps ...map[string]interface{}) map[string]interface{} {
 	return merged
 }
 
-func (token *acToken) tokenRun(qwmsg *Qwmsg) {
-	ticker := time.NewTicker(token.Interval)
+func newtkCache(qwmsg *Qwmsg) *actkCache {
+	duration := time.Duration(qwmsg.Configs.Expiresin) * time.Second
+	tokenCache := &actkCache{stop: make(chan bool), interval: duration, cache: cache.New(duration, -1), cacheLocal: path.Join(os.TempDir(), "qwmsg")}
+	if _, err := os.Stat(tokenCache.cacheLocal); err == nil {
+		tokenCache.cache.LoadFile(tokenCache.cacheLocal)
+	}
+	if _, expiresin, geted := tokenCache.cache.GetWithExpiration(tkcacheKey); (!geted) || time.Now().After(expiresin) {
+		if tk, err := getToken(qwmsg); err == nil {
+			tokenCache.cache.Set(tkcacheKey, tk, tokenCache.interval)
+			tokenCache.cache.SaveFile(tokenCache.cacheLocal)
+		}
+	}
+	return tokenCache
+}
+
+func (tokenCache *actkCache) tkcacheRun(qwmsg *Qwmsg) {
+	ticker := time.NewTicker(tokenCache.interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			qwmsg.wxGetAccessToken()
-		case <-token.stop:
-			fmt.Println("GC stoped.")
+			if token, err := getToken(qwmsg); err == nil {
+				tokenCache.cache.Set(tkcacheKey, token, tokenCache.interval)
+				tokenCache.cache.SaveFile(tokenCache.cacheLocal)
+			}
+		case <-tokenCache.stop:
 			return
 		}
 	}
 }
 
 func New(configs Config) *Qwmsg {
+	if configs.Expiresin > maxExpiresin {
+		configs.Expiresin = maxExpiresin
+	}
 	qwmsg := &Qwmsg{Configs: configs}
 	qwmsg.CommonField = make(map[string]interface{})
-	qwmsg.Token = &acToken{stop: make(chan bool), Interval: time.Duration(configs.TokenExpiresin) * time.Second}
-	qwmsg.wxGetAccessToken()
 	qwmsg.SetCommonField(CommonField{ToUser: "@all", AgentId: configs.Agentid})
-	go qwmsg.Token.tokenRun(qwmsg)
-	runtime.SetFinalizer(qwmsg, (*Qwmsg).tokenStop)
+	qwmsg.tokenCache = newtkCache(qwmsg)
+	go qwmsg.tokenCache.tkcacheRun(qwmsg)
+	runtime.SetFinalizer(qwmsg, (*Qwmsg).tkcacheStop)
 	return qwmsg
 }
 
-func (qwmsg *Qwmsg) tokenStop() {
-	qwmsg.Token.stop <- true
+func (qwmsg *Qwmsg) tkcacheStop() {
+	qwmsg.tokenCache.stop <- true
 }
 
-func (qwmsg *Qwmsg) wxGetAccessToken() error {
+func getToken(qwmsg *Qwmsg) (string, error) {
 	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=%s&corpsecret=%s", qwmsg.Configs.Corpid, qwmsg.Configs.Corpsecret)
 	for try := qwmsg.Configs.Retry; try >= 0; try-- {
 		if response, err := requests.Get(requrl); err == nil {
 			v := make(map[string]interface{})
 			if response.Json(&v) == nil {
 				if v["errcode"].(float64) == 0 {
-					qwmsg.Token.Content = v["access_token"].(string)
-					fmt.Println(qwmsg.Token.Content)
-					return nil
+					return v["access_token"].(string), nil
 				} else {
-					return errors.New(v["errmsg"].(string))
+					return "", errors.New(v["errmsg"].(string))
 				}
 			}
 		}
 	}
-	return ErrorStill
+	return "", ErrorStill
 }
 
-func (qwmsg *Qwmsg) AccessToken() string {
-	return qwmsg.Token.Content
+func (qwmsg *Qwmsg) token() string {
+	if tk, geted := qwmsg.tokenCache.cache.Get(tkcacheKey); geted {
+		return tk.(string)
+	}
+	return ""
+}
+
+func (qwmsg *Qwmsg) Test() {
+	token, _, _ := qwmsg.tokenCache.cache.GetWithExpiration(tkcacheKey)
+	fmt.Println(token)
 }
 
 func (qwmsg *Qwmsg) SetCommonField(common CommonField) {
@@ -146,7 +178,7 @@ func (qwmsg *Qwmsg) SendTextMsg(content string, safe bool) error {
 			"safe": 1,
 		})
 	}
-	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.AccessToken())
+	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.token())
 	for try := qwmsg.Configs.Retry; try >= 0; try-- {
 		if response, err := requests.PostJson(requrl, reqdata); err == nil {
 			v := make(map[string]interface{})
@@ -165,7 +197,7 @@ func (qwmsg *Qwmsg) SendTextMsg(content string, safe bool) error {
 }
 
 func (qwmsg *Qwmsg) PostMedia(filename string, filetype MediaType) (media_id string, ierr error) {
-	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token=%s&type=%s", qwmsg.AccessToken(), filetype)
+	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token=%s&type=%s", qwmsg.token(), filetype)
 	for try := qwmsg.Configs.Retry; try >= 0; try-- {
 		if response, err := requests.Post(requrl, requests.Files{"media": filename}); err == nil {
 			v := make(map[string]interface{})
@@ -193,7 +225,7 @@ func (qwmsg *Qwmsg) SendImageMsg(media_id string, safe bool) error {
 			"safe": 1,
 		})
 	}
-	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.AccessToken())
+	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.token())
 	for try := qwmsg.Configs.Retry; try >= 0; try-- {
 		if response, err := requests.PostJson(requrl, reqdata); err == nil {
 			v := make(map[string]interface{})
@@ -221,7 +253,7 @@ func (qwmsg *Qwmsg) SendFileMsg(media_id string, safe bool) error {
 			"safe": 1,
 		})
 	}
-	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.AccessToken())
+	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.token())
 	for try := qwmsg.Configs.Retry; try >= 0; try-- {
 		if response, err := requests.PostJson(requrl, reqdata); err == nil {
 			v := make(map[string]interface{})
@@ -248,7 +280,7 @@ func (qwmsg *Qwmsg) SendTextCardMsg(title, description, url string) error {
 			"url":         url,
 		},
 	})
-	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.AccessToken())
+	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.token())
 	for try := qwmsg.Configs.Retry; try >= 0; try-- {
 		if response, err := requests.PostJson(requrl, reqdata); err == nil {
 			v := make(map[string]interface{})
@@ -294,7 +326,7 @@ func (qwmsg *Qwmsg) SendNewsMsg(news []NewsMsg, safe bool) error {
 			"safe": 1,
 		})
 	}
-	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.AccessToken())
+	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.token())
 	for try := qwmsg.Configs.Retry; try >= 0; try-- {
 		if response, err := requests.PostJson(requrl, reqdata); err == nil {
 			v := make(map[string]interface{})
@@ -319,7 +351,7 @@ func (qwmsg *Qwmsg) SendMarkdownMsg(content string) error {
 			"content": content,
 		},
 	})
-	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.AccessToken())
+	requrl := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s", qwmsg.token())
 	for try := qwmsg.Configs.Retry; try >= 0; try-- {
 		if response, err := requests.PostJson(requrl, reqdata); err == nil {
 			v := make(map[string]interface{})
