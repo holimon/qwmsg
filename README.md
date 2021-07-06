@@ -18,5 +18,5 @@
 > Corpid和Corpsecret当然是假的
 ```
 ins := New(Config{Corpid: "qq46e2334254dasfwe", Corpsecret: "dwerfFEFFWEFE234324dwdffwrnmfljQ", Agentid: 1000002, Expiresin: 2400})
-	ins.SendTextMsg("teststring\n232323232", false)
+ins.SendTextMsg("teststring\n232323232", false)
 ```
